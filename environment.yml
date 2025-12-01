@@ -1,0 +1,15 @@
+name: cwt_env
+channels:
+  - conda-forge
+  - defaults
+dependencies:
+  - python=3.12
+  - numpy
+  - matplotlib
+  - scipy
+  - autograd
+  - pyqt              
+  - pip
+  - pip:
+    - legume-gme
+    - rich
