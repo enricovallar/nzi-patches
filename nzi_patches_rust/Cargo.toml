@@ -1,0 +1,12 @@
+[package]
+name = "nzi_patches_rust"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+num-complex = "0.4"
+num-traits = "0.2"
+nalgebra = "0.32"
+
+scilib = "0.4"
+plotters = "0.3"
