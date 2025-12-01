@@ -174,7 +174,7 @@ if num_modes > 0:
     # ==========================================
     # 7. PLOT FIELD DISTRIBUTIONS
     # ==========================================
-    fields = cwt_solver.calculate_field_distributions(eigvecs, a)
+    fields = cwt_solver.calculate_field_distributions(eigvecs, None,  a, 2,2)
     
     for i, field in enumerate(fields):
         # Normalize field by max amplitude
