@@ -126,8 +126,8 @@ if num_modes > 0:
     }
 
     # Construct Matrices
-    C_1D, C_rad, C_2D = cwt_solver.construct_cwt_matrices(cwt_params)
-    C_total = C_1D + C_rad + C_2D
+    C_1D, C_rad, C_2D, C_k = cwt_solver.construct_cwt_matrices(cwt_params)
+    C_total = C_1D + C_rad + C_2D + C_k
 
     # Solve Eigenvalues
     eigvals, eigvecs = cwt_solver.solve_cwt_eigenproblem(C_total)
@@ -174,7 +174,15 @@ if num_modes > 0:
     # ==========================================
     # 7. PLOT FIELD DISTRIBUTIONS
     # ==========================================
-    fields = cwt_solver.calculate_field_distributions(eigvecs, None,  a, 2,2)
+    fields = cwt_solver.calculate_field_distributions(
+        eigvecs, 
+        a, 
+        te0['theta'], 
+        z_grid, 
+        0.0, # z_val
+        k_vec=None, 
+        resolution=100
+    )
     
     for i, field in enumerate(fields):
         # Normalize field by max amplitude
@@ -211,6 +219,119 @@ if num_modes > 0:
         plt.savefig(f'mode_{i+1}_hz.png')
         print(f"Saved plot: mode_{i+1}_hz.png")
         plt.close()
+
+    # ==========================================
+    # 8. BAND STRUCTURE CALCULATION
+    # ==========================================
+    print("\n--- Calculating Band Structure ---")
+    
+    # Define k-path (small deviation from Gamma)
+    # The CWT is valid for small k.
+    # We will plot Gamma -> X -> M -> Gamma
+    
+    k_scale = 0.05 * (2 * np.pi / a) # 5% of the Brillouin zone
+    num_points = 50
+    
+    # Path 1: Gamma to X (0,0) -> (k_scale, 0)
+    k_path_1 = np.zeros((num_points, 2))
+    k_path_1[:, 0] = np.linspace(0, k_scale, num_points)
+    
+    # Path 2: X to M (k_scale, 0) -> (k_scale, k_scale)
+    k_path_2 = np.zeros((num_points, 2))
+    k_path_2[:, 0] = k_scale
+    k_path_2[:, 1] = np.linspace(0, k_scale, num_points)
+    
+    # Path 3: M to Gamma (k_scale, k_scale) -> (0, 0)
+    k_path_3 = np.zeros((num_points, 2))
+    k_path_3[:, 0] = np.linspace(k_scale, 0, num_points)
+    k_path_3[:, 1] = np.linspace(k_scale, 0, num_points)
+    
+    # Combine paths
+    k_path = np.vstack((k_path_1, k_path_2, k_path_3))
+    total_points = k_path.shape[0]
+    
+    # Prepare arrays for results
+    # Determine number of modes from the first calculation
+    # This makes the code robust if the solver changes (e.g. more coupled waves)
+    num_bands = len(eigvals)
+    print(f"Number of bands to plot: {num_bands}")
+    
+    bands_real = np.zeros((total_points, num_bands))
+    bands_imag = np.zeros((total_points, num_bands))
+    
+    # Loop over k-points
+    for i in range(total_points):
+        kx, ky = k_path[i]
+        
+        # Update params with current k
+        cwt_params['k_vec'] = (kx, ky)
+        
+        # Construct and Solve
+        C_1D, C_rad, C_2D, C_k = cwt_solver.construct_cwt_matrices(cwt_params)
+        C_total = C_1D + C_rad + C_2D + C_k
+        
+        vals, vecs = cwt_solver.solve_cwt_eigenproblem(C_total)
+        
+        # Sort eigenvalues to keep bands continuous?
+        # Simple sorting by real part might swap bands if they cross.
+        # Sorting by imaginary part is what solve_cwt_eigenproblem does.
+        # Let's stick with that for now, or sort by real part here.
+        
+        # Sort by real part for band diagram plotting
+        idx_real = np.argsort(np.real(vals))
+        vals = vals[idx_real]
+        
+        bands_real[i, :] = np.real(vals)
+        bands_imag[i, :] = np.imag(vals)
+
+    # Plot Band Diagram
+    plt.figure(figsize=(10, 6))
+    
+    # X-axis for plotting
+    x_axis = np.arange(total_points)
+
+    # Convert to Normalized Frequency a/lambda
+    # delta = n_eff * (omega - omega_Bragg) / c
+    # omega = delta * c / n_eff + omega_Bragg
+    # norm_freq = omega * a / (2 * pi * c) = a / lambda
+    #           = (delta * c / n_eff + 2*pi*c/lambda0) * a / (2*pi*c)
+    #           = (delta * a) / (2*pi*n_eff) + a/lambda0
+    
+    norm_freq_real = bands_real * a / (2 * np.pi * te0['neff']) + a / lambda0
+    norm_freq_imag = bands_imag * a / (2 * np.pi * te0['neff'])
+    
+    # Plot Real Part (Normalized Frequency)
+    plt.subplot(1, 1, 1)
+    for b in range(num_bands):
+        plt.plot(x_axis, norm_freq_real[:, b], label=f'Band {b+1}')
+        
+    # Add vertical lines for symmetry points
+    plt.axvline(x=num_points-1, color='k', linestyle='--', alpha=0.5)
+    plt.axvline(x=2*num_points-1, color='k', linestyle='--', alpha=0.5)
+    
+    # Labels
+    plt.xticks([0, num_points-1, 2*num_points-1, total_points-1], ['$\Gamma$', 'X', 'M', '$\Gamma$'])
+    plt.ylabel(r'Normalized Frequency ($a/\lambda$)')
+    plt.title('CWT Band Structure')
+    plt.grid(True, alpha=0.3)
+    plt.legend()
+    
+    # # Plot Imaginary Part (Normalized Loss)
+    # plt.subplot(2, 1, 2)
+    # for b in range(4):
+    #     plt.plot(x_axis, norm_freq_imag[:, b], label=f'Band {b+1}')
+        
+    # plt.axvline(x=num_points-1, color='k', linestyle='--', alpha=0.5)
+    # plt.axvline(x=2*num_points-1, color='k', linestyle='--', alpha=0.5)
+    
+    # plt.xticks([0, num_points-1, 2*num_points-1, total_points-1], ['$\Gamma$', 'X', 'M', '$\Gamma$'])
+    # plt.ylabel(r'Normalized Loss ($Im(a/\lambda)$)')
+    # plt.xlabel('Wavevector k')
+    # plt.grid(True, alpha=0.3)
+    
+    plt.tight_layout()
+    plt.savefig('cwt_band_diagram.png')
+    print("Saved plot: cwt_band_diagram.png")
 
 else:
     print("Error: No vertical guided modes found. Cannot run CWT.")

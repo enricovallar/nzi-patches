@@ -1,5 +1,6 @@
 import numpy as np
 from scipy.integrate import simpson as simps
+from scipy.interpolate import interp1d
 
 def get_beta0(a):
     """Basic wave propagation constant (2nd order Gamma point)."""
@@ -215,7 +216,25 @@ def construct_cwt_matrices(params):
             # We will perform a 1st-neighbor approximation (1,1) family only.
             pass
 
-    return C_1D, C_rad, C_2D
+    # =========================================================================
+    # 4. k-vector Detuning (Off-Gamma)
+    # =========================================================================
+    # If k_vec is provided, add diagonal detuning terms.
+    # k_vec = (kx, ky) represents deviation from the Gamma point (second-order).
+    # Rx (forward x): +kx
+    # Sx (backward x): -kx
+    # Ry (forward y): +ky
+    # Sy (backward y): -ky
+    
+    C_k = np.zeros((4, 4), dtype=complex)
+    if 'k_vec' in params and params['k_vec'] is not None:
+        kx, ky = params['k_vec']
+        C_k[0, 0] = kx
+        C_k[1, 1] = -kx
+        C_k[2, 2] = ky
+        C_k[3, 3] = -ky
+
+    return C_1D, C_rad, C_2D, C_k
 
 def solve_cwt_eigenproblem(C_total):
     """
@@ -231,29 +250,46 @@ def solve_cwt_eigenproblem(C_total):
     idx = np.argsort(np.imag(eigvals))
     return eigvals[idx], eigvecs[:, idx]
 
-def calculate_field_distributions(eigvecs, theta, a, Nx, Ny, resolution=100, z = None):
+def calculate_field_distributions(eigvecs, a, theta_z, z_grid, z_val, k_vec=None, resolution=100):
     """
-    Reconstructs the Hz field distribution for each eigenmode at z=d/2.
+    Reconstructs the Hz field distribution for each eigenmode at a specific z.
     
     Parameters:
     - eigvecs: Eigenvectors matrix (4 x N_modes) from solve_cwt_eigenproblem
                Rows are [Rx, Sx, Ry, Sy]
     - a: Lattice constant
-    - Nx: Number of unit cells in x direction
-    - Ny: Number of unit cells in y direction
+    - theta_z: Vertical mode profile array (magnitude or complex)
+    - z_grid: z-coordinates array corresponding to theta_z
+    - z_val: Specific z value to plot the field at
+    - k_vec: Tuple (kx, ky) for the general wavevector. If None, assumes Gamma (k=0).
+             This adds the slowly varying envelope phase exp(-i k.r).
     - resolution: Number of points per unit cell for plotting
-    - z: Vertical position to evaluate field (default d/2, slab top)
     
     Returns:
-    - fields: List of 2D arrays (resolution*Ny x resolution*Nx), one for each mode.
-              Each array contains the complex Hz field.
+    - fields: List of 2D arrays (resolution x resolution), one for each mode.
+              Each array contains the complex Hz field at z=z_val.
     """
     beta0 = 2 * np.pi / a
     
-    # Create coordinate grid for the region of size Nx x Ny unit cells
-    x = np.linspace(-a*Nx/2, a*Nx/2, resolution * Nx)
-    y = np.linspace(-a*Ny/2, a*Ny/2, resolution * Ny)
+    # Interpolate theta(z) at the specific z_val
+    # We assume theta_z might be complex, so interpolate real/imag separately or use complex support
+    theta_interp_func = interp1d(z_grid, theta_z, kind='linear', fill_value=0.0, bounds_error=False)
+    theta_at_z = theta_interp_func(z_val)
+    
+    # Create coordinate grid for one unit cell (centered at 0)
+    # The unit cell goes from -a/2 to a/2
+    x = np.linspace(-a/2, a/2, resolution)
+    y = np.linspace(-a/2, a/2, resolution)
     X, Y = np.meshgrid(x, y)
+    
+    # Handle general k-vector (envelope phase)
+    # If calculating band structure away from Gamma, k_vec is non-zero
+    if k_vec is None:
+        kx, ky = 0.0, 0.0
+    else:
+        kx, ky = k_vec
+        
+    envelope_phase = np.exp(-1j * (kx * X + ky * Y))
     
     fields = []
     num_modes = eigvecs.shape[1]
@@ -264,28 +300,31 @@ def calculate_field_distributions(eigvecs, theta, a, Nx, Ny, resolution=100, z =
         Rx, Sx, Ry, Sy = vec[0], vec[1], vec[2], vec[3]
         
         # Reconstruct Field
-        # Basic waves are plane waves modulated by the envelope (which is 1 for infinite)
-        # H_z approx sum of basic waves
-        # Rx corresponds to exp(-i * beta0 * x)
-        # Sx corresponds to exp(+i * beta0 * x)  (Note: beta0 = 2pi/a is G vector)
-        # Ry corresponds to exp(-i * beta0 * y)
-        # Sy corresponds to exp(+i * beta0 * y)
-        
-        # Check sign convention in Liang 2012 Eq 4: 
-        # Field = sum E_mn * exp(-i m beta0 x - i n beta0 y)
-        # Rx is E_{y, 1,0} -> m=1, n=0 -> exp(-i beta0 x)
-        # Sx is E_{y, -1,0} -> m=-1, n=0 -> exp(+i beta0 x)
-        # Ry is E_{x, 0,1} -> m=0, n=1 -> exp(-i beta0 y)
-        # Sy is E_{x, 0,-1} -> m=0, n=-1 -> exp(+i beta0 y)
+        # The total field is the sum of basic waves modulated by the envelope and vertical profile
+        # E(r) = Theta(z) * exp(-i k.r) * sum( A_G * exp(-i G.r) )
+        #
+        # Mapping eigenvectors to basic waves (Liang 2012):
+        # Rx corresponds to G = (beta0, 0)   -> exp(-i * beta0 * x)
+        # Sx corresponds to G = (-beta0, 0)  -> exp(+i * beta0 * x)
+        # Ry corresponds to G = (0, beta0)   -> exp(-i * beta0 * y)
+        # Sy corresponds to G = (0, -beta0)  -> exp(+i * beta0 * y)
+        #
+        # Note: Liang Eq 4 uses exp(-i m beta0 x).
+        # Rx is defined as wave propagating in +x.
+        # Typically +x wave is exp(-i beta x). So G=(beta0, 0) makes sense.
+        # This means m=1.
         
         term_Rx = Rx * np.exp(-1j * beta0 * X)
         term_Sx = Sx * np.exp(1j * beta0 * X)
         term_Ry = Ry * np.exp(-1j * beta0 * Y)
         term_Sy = Sy * np.exp(1j * beta0 * Y)
         
-        # Total field (scalar proxy for H_z or E_total)
-        # For TE, Hz is the scalar field that is often plotted
-        field_dist = term_Rx + term_Sx + term_Ry + term_Sy
+        # Total in-plane pattern (sum of Bloch components)
+        bloch_sum = term_Rx + term_Sx + term_Ry + term_Sy
+        
+        # Full 3D field slice at z
+        # Multiply by vertical profile Theta(z) and Envelope phase exp(-ik.r)
+        field_dist = theta_at_z * envelope_phase * bloch_sum
         
         fields.append(field_dist)
         
